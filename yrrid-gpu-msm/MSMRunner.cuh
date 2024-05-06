@@ -8,11 +8,13 @@ Author(s):  Niall Emmart
 
 ***/
 
-template<class BaseCurve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
+template<class BaseCurve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
 class MSMRunner {
   private:
   uint32_t _maxPointCount;
   uint32_t _pointCount;
+  uint32_t _uniformBucketPointCount;
+  void*    _uniformBucketMSM;
 
   public:
   typedef BaseCurve                                              Curve;
@@ -23,6 +25,7 @@ class MSMRunner {
   static const uint32_t     BUCKET_BITS=Planning::BUCKET_BITS;
 
   MSMRunner(uint32_t maxPointCount);
+  ~MSMRunner();
 
   // memory management
   size_t pointBytesRequired();
@@ -33,6 +36,7 @@ class MSMRunner {
   // MSM interfaces
   int32_t runPointGeneration(cudaStream_t stream, void* points, void* secretScalars, uint32_t pointCount);
   int32_t runPointPrecompute(cudaStream_t stream, void* scaledPoints, void* sourcePoints, uint32_t pointCount);
+  int32_t runUniformBucketsSetup(cudaStream_t stream, void* reduceMemory, void* bucketMemory, void* planningMemory, void* pointMemory, uint32_t pointCount);
   int32_t runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t pointCount);
   int32_t runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t startPoint, uint32_t stopPoint);
   int32_t runAccumulate(cudaStream_t stream, void* bucketMemory, void* planningMemory, void* pointMemory, bool preloaded=false);

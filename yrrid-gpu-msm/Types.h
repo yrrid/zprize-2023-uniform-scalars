@@ -57,6 +57,8 @@ typedef struct {
   uint32_t* bucketOffsets;                   // size: BUCKET_COUNT
   uint32_t* bucketSizeCounts;                // size: 256
   uint32_t* bucketSizeNexts;                 // size: 256
+
+  uint32_t* randomScalars;                   // size: N*8
 } PlanningLayout;
 
 template<uint32_t n>

@@ -54,6 +54,7 @@ class Curve {
 
     PointXYZZ();
     PointXYZZ(const Field& x, const Field& y, const Field& zz, const Field& zzz);
+    PointXYZZ(const PointXY& point);
     static PointXYZZ infinity();
     static PointXYZZ fromCString(const char* cString);
     void load(const uint64_t* serializedWords);
@@ -99,6 +100,7 @@ class Curve {
 
     void      negate();
     void      dbl();
+    void      addXY(const PointXY& point);
     void      addXYTZ(const PointXYTZ& point);
 
     bool      isInfinity() const;
@@ -280,7 +282,8 @@ void Curve<FieldClass>::PointXY::fromDeviceMontgomery() {
 
 template<class FieldClass>
 void Curve<FieldClass>::PointXY::negate() {
-  FieldClass::sub(y, FieldClass::Field::constN, y);
+  if(isInfinity()) return;
+  FieldClass::sub(y, FieldClass::constN, y);
 }
 
 template<class FieldClass>
@@ -355,6 +358,14 @@ Curve<FieldClass>::PointXYZZ::PointXYZZ(const Field& inX, const Field& inY, cons
   FieldClass::set(y, inY);
   FieldClass::set(zz, inZZ);
   FieldClass::set(zzz, inZZZ);
+}
+
+template<class FieldClass>
+Curve<FieldClass>::PointXYZZ::PointXYZZ(const PointXY& point) {
+  FieldClass::set(x, point.x);
+  FieldClass::set(y, point.y);
+  FieldClass::setOne(zz);
+  FieldClass::setOne(zzz);
 }
 
 template<class FieldClass>
@@ -450,7 +461,7 @@ void Curve<FieldClass>::PointXYZZ::fromDeviceMontgomery() {
 
 template<class FieldClass>
 void Curve<FieldClass>::PointXYZZ::negate() {
-  FieldClass::sub(y, FieldClass::Field::constN, y);
+  FieldClass::sub(y, FieldClass::const2N, y);
 }
 
 template<class FieldClass>
@@ -793,13 +804,22 @@ void Curve<FieldClass>::PointXYTZ::fromDeviceMontgomery() {
 
 template<class FieldClass>
 void Curve<FieldClass>::PointXYTZ::negate() {
-  FieldClass::sub(x, FieldClass::Field::constN, x);
-  FieldClass::sub(t, FieldClass::Field::constN, t);
+  FieldClass::sub(x, FieldClass::const2N, x);
+  FieldClass::sub(t, FieldClass::const2N, t);
 }
 
 template<class FieldClass>
 void Curve<FieldClass>::PointXYTZ::dbl() {
    add(*this);
+}
+
+template<class FieldClass>
+void Curve<FieldClass>::PointXYTZ::addXY(const PointXY& point) {
+  if(!point.isInfinity()) {
+    PointXYTZ temp(point);
+
+    addXYTZ(temp);
+  }
 }
 
 template<class FieldClass>

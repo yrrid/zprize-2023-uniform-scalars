@@ -33,23 +33,22 @@ Author(s):  Niall Emmart
 
 #define CUDA_CHECK(call) { int localEC=call; if(localEC!=cudaSuccess) { printf("\nCall \"" #call "\" failed from %s, line %d, error=%d\n", __FILE__, __LINE__, localEC); exit(1); } }
 
-
 /********************************************************************************************
  * Possible run options for BLS12377G1:
  *
- *     typedef MSMRunner<BLS12377G1, ACCUMULATION_TWISTED_EDWARDS_XY, 23, 6, 2> Run377;
- *     typedef MSMRunner<BLS12377G1, ACCUMULATION_TWISTED_EDWARDS_XYT, 23, 6, 2> Run377;
- *     typedef MSMRunner<BLS12377G1, ACCUMULATION_EXTENDED_JACOBIAN, 23, 6, 2> Run377;
- *     typedef MSMRunner<BLS12377G1, ACCUMULATION_EXTENDED_JACOBIAN_ML, 23, 6, 2> Run377;
+ *     typedef MSMRunner<BLS12377G1, ACCUMULATION_TWISTED_EDWARDS_XY, 23, 6, 2, false> Run377;
+ *     typedef MSMRunner<BLS12377G1, ACCUMULATION_TWISTED_EDWARDS_XYT, 23, 6, 2, false> Run377;
+ *     typedef MSMRunner<BLS12377G1, ACCUMULATION_EXTENDED_JACOBIAN, 23, 6, 2, false> Run377;
+ *     typedef MSMRunner<BLS12377G1, ACCUMULATION_EXTENDED_JACOBIAN_ML, 23, 6, 2, false> Run377;
  *
  * Possible run options for BLS12381G1:
- *     typedef MSMRunner<BLS12381G1, ACCUMULATION_EXTENDED_JACOBIAN, 22, 5, 2> Run381;
- *     typedef MSMRunner<BLS12381G1, ACCUMULATION_EXTENDED_JACOBIAN_ML, 22, 5, 2> Run381;
+ *     typedef MSMRunner<BLS12381G1, ACCUMULATION_EXTENDED_JACOBIAN, 22, 5, 2, false> Run381;
+ *     typedef MSMRunner<BLS12381G1, ACCUMULATION_EXTENDED_JACOBIAN_ML, 22, 5, 2, false> Run381;
  * 
  ********************************************************************************************/
 
-typedef MSMRunner<BLS12377G1, ACCUMULATION_TWISTED_EDWARDS_XY, 23, 6, 2> Best377;
-typedef MSMRunner<BLS12381G1, ACCUMULATION_EXTENDED_JACOBIAN_ML, 22, 5, 2> Best381;
+typedef MSMRunner<BLS12377G1, ACCUMULATION_TWISTED_EDWARDS_XY, 23, 6, 2, true> Best377;
+typedef MSMRunner<BLS12381G1, ACCUMULATION_EXTENDED_JACOBIAN_ML, 22, 5, 2, true> Best381;
 
 class MSMBatch {
   public:
@@ -128,6 +127,14 @@ class MSMBatch {
     return -1;
   }
 
+  int32_t runUniformBucketsSetup(cudaStream_t stream, void* reduceMemory, void* bucketMemory, void* planningMemory, void* pointMemory, uint32_t pointCount) {
+    if(curve==377)
+      return runner377->runUniformBucketsSetup(stream, reduceMemory, bucketMemory, planningMemory, pointMemory, pointCount);
+    else if(curve==381)
+      return runner381->runUniformBucketsSetup(stream, reduceMemory, bucketMemory, planningMemory, pointMemory, pointCount);
+    return -1;
+  }
+
   int32_t runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t startPoint, uint32_t stopPoint) {
     if(curve==377)
       return runner377->runPlanning(stream, planningMemory, scalars, startPoint, stopPoint);
@@ -171,7 +178,6 @@ class MSMBatch {
     }
     return -1;
   }
-
 };
 
 void* byteOffset(void* ptr, size_t bytes) {
@@ -270,7 +276,6 @@ int32_t preprocessPoints(void* contextPtr, void* pointData, uint32_t pointCount)
   CUDA_CHECK(cudaMemcpy(batch->pointMemory, pointData, 96*pointCount, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMalloc(&batch->scaledPointMemory, batch->pointBytesRequired()));
   CUDA_CHECK(batch->runPointPrecompute(stream, batch->scaledPointMemory, batch->pointMemory, pointCount));
-  CUDA_CHECK(cudaStreamDestroy(stream));
 
   // we're done with the point memory, clean it up
   CUDA_CHECK(cudaFree(batch->pointMemory));
@@ -281,6 +286,11 @@ int32_t preprocessPoints(void* contextPtr, void* pointData, uint32_t pointCount)
   CUDA_CHECK(cudaMalloc(&batch->planningMemory, batch->planningBytesRequired()));
   CUDA_CHECK(cudaMalloc(&batch->bucketMemory, batch->bucketBytesRequired()));
   CUDA_CHECK(cudaMalloc(&batch->reduceMemory, batch->maxBatchCount*batch->reduceBytesRequired()));
+
+  // setup unform buckets
+  CUDA_CHECK(batch->runUniformBucketsSetup(stream, batch->reduceMemory, batch->bucketMemory, batch->planningMemory, batch->scaledPointMemory, pointCount));
+
+  CUDA_CHECK(cudaStreamDestroy(stream));
   return 0;
 }
 

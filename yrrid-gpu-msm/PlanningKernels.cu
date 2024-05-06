@@ -163,6 +163,75 @@ __device__ __forceinline__ void signedDigits(uint32_t* buckets, const uint4& lo,
 }
 
 template<class Planning>
+__device__ __forceinline__ void signedDigits(uint32_t* buckets, const uint4& lo, const uint4& hi, const uint4& rLo, uint4& rHi, uint32_t pointIndex) {
+  const uint32_t WINDOWS=Planning::WINDOWS, SIGN_BIT=Planning::SIGN_BIT, SIGN_MASK=1u<<SIGN_BIT, WINDOW_BITS=Planning::WINDOW_BITS;
+  const uint32_t WINDOW_MASK=(1u<<WINDOW_BITS)-1, BUCKET_BITS=Planning::BUCKET_BITS, BUCKET_MASK=(1u<<BUCKET_BITS)-1;
+  const uint32_t EXPONENT_BITS=Planning::EXPONENT_BITS, EXPONENT_HIGH_WORD=Planning::EXPONENT_HIGH_WORD;
+  const bool     EXACT=EXPONENT_BITS%WINDOW_BITS==0;
+
+  chain_t  chain;
+  uint32_t add=0, negate=0, order[9], scalar[9];
+
+  Planning::setOrder(order);
+  order[8]=0;
+
+  // UNIFORM BUCKET SUPPORT:
+  // add the pregenerated random scalar to each MSM scalar term.  If the 
+  // result is greater than the curve order, subtract the curve order.
+
+  scalar[0]=chain.add(lo.x, rLo.x);
+  scalar[1]=chain.add(lo.y, rLo.y);
+  scalar[2]=chain.add(lo.z, rLo.z);
+  scalar[3]=chain.add(lo.w, rLo.w);
+  scalar[4]=chain.add(hi.x, rHi.x);
+  scalar[5]=chain.add(hi.y, rHi.y);
+  scalar[6]=chain.add(hi.z, rHi.z);
+  scalar[7]=chain.add(hi.w, rHi.w);
+  scalar[8]=0;
+  if(scalar[7]>order[7])
+    mp_sub<9>(scalar, scalar, order);
+  
+  if constexpr (EXACT) {
+    const uint32_t EXPONENT_HIGH_BIT=1U<<(EXPONENT_BITS-7*32-1);
+
+    if((scalar[7] & EXPONENT_HIGH_BIT)!=0) {
+      mp_sub<9>(scalar, order, scalar);
+      negate=SIGN_MASK;
+    }
+  }
+  else {
+    const uint32_t EXPONENT_MOD=(0x80000000ull<<WINDOWS*WINDOW_BITS-256)/(EXPONENT_HIGH_WORD+1);
+
+    mp_scale<9>(order, order, pointIndex % EXPONENT_MOD);
+    mp_add<9>(scalar, scalar, order);
+  }
+
+  if constexpr (WINDOW_BITS==16) 
+    slice16(buckets, scalar);
+  else if constexpr (WINDOW_BITS==22) 
+    slice22(buckets, scalar);
+  else if constexpr (WINDOW_BITS==23) 
+    slice23(buckets, scalar);
+  else {
+    #pragma unroll
+    for(int32_t i=0;i<WINDOWS;i++)
+      buckets[i]=0;
+  }
+
+  #pragma unroll
+  for(int32_t i=0;i<WINDOWS;i++) {
+    buckets[i]+=add;
+    add=(buckets[i]>BUCKET_MASK+1) ? 1 : 0;
+    if((buckets[i] & WINDOW_MASK)==0)
+      buckets[i]=0xFFFFFFFF;
+    else if(buckets[i]<=BUCKET_MASK+1)
+      buckets[i]=buckets[i]-1 ^ negate;
+    else
+      buckets[i]=buckets[i] ^ (SIGN_MASK + WINDOW_MASK) ^ negate;
+  }
+}
+
+template<class Planning>
 __global__ void zeroCounters(PlanningLayout layout) {
   uint32_t  globalTID=blockIdx.x*blockDim.x + threadIdx.x, globalStride=blockDim.x*gridDim.x;
 
@@ -214,6 +283,62 @@ __global__ void partitionIntoBins(PlanningLayout layout, uint4* scalars, uint32_
     hi=scalars[2*i+1];
  
     signedDigits<Planning>(buckets, lo, hi, i);
+
+    #pragma unroll
+    for(int32_t j=0;j<WINDOWS;j++) {
+      if(buckets[j]!=0xFFFFFFFF) {
+        bucket=buckets[j] & BUCKET_MASK;
+        bin=bucket>>BIN_BITS;
+        atomicAdd(&localBigBinCounts[bucket>>BUCKET_BITS-8], 1);
+        offset=atomicAdd(&layout.binCounts[group*BINS_PER_GROUP + bin], 1);
+        if(offset<pointsPerBin) {
+          append=(bucket & BIN_MASK)*2 + (buckets[j]>>SIGN_BIT) << 4;
+          append=(append + j<<INDEX_BITS) + groupIndex;
+          store_global_u32(&layout.binnedPointIndexes[(bin*groupCount + group)*pointsPerBin + offset], append);
+        }
+        else {
+          offset=atomicAdd(layout.overflowCount, 1);
+          store_global_u2(&layout.overflow[offset], make_uint2(buckets[j], i + j*maxPointCount));
+          atomicAdd(&layout.bucketOverflowCounts[bucket], 1);
+        }
+      }
+    }
+  }   
+
+  __syncthreads();
+
+  if(threadIdx.x<256) 
+    atomicAdd(&layout.bigBinCounts[threadIdx.x], localBigBinCounts[threadIdx.x]);
+}
+
+template<class Planning>
+__global__ void partitionIntoBins(PlanningLayout layout, uint4* scalars, uint4* randomScalars, uint32_t startPoint, uint32_t stopPoint) {
+  const uint32_t WINDOWS=Planning::WINDOWS, INDEX_BITS=Planning::INDEX_BITS, INDEX_MASK=(1u<<INDEX_BITS)-1, BINS_PER_GROUP=Planning::BINS_PER_GROUP;
+  const uint32_t BIN_BITS=Planning::BIN_BITS, BIN_MASK=(1u<<BIN_BITS)-1, BUCKET_BITS=Planning::BUCKET_BITS, BUCKET_MASK=(1u<<BUCKET_BITS)-1;
+  const uint32_t SIGN_BIT=Planning::SIGN_BIT;
+
+  uint32_t globalTID=blockIdx.x*blockDim.x + threadIdx.x;
+  uint4    lo, hi, rLo, rHi;
+  uint32_t buckets[16];
+  uint32_t group, groupIndex, bucket, append, bin, offset, groupCount=layout.groupCount, pointsPerBin=layout.pointsPerBinGroup, maxPointCount=layout.maxPointCount;
+  
+  __shared__ uint32_t localBigBinCounts[256];
+
+  if(threadIdx.x<256)
+    localBigBinCounts[threadIdx.x]=0;
+
+  __syncthreads();
+
+  for(uint32_t i=startPoint + globalTID;i<stopPoint;i+=blockDim.x*gridDim.x) {
+    group=i>>INDEX_BITS;
+    groupIndex=i & INDEX_MASK;
+
+    lo=scalars[2*i+0];
+    hi=scalars[2*i+1];
+    rLo=randomScalars[2*i+0];
+    rHi=randomScalars[2*i+1];
+ 
+    signedDigits<Planning>(buckets, lo, hi, rLo, rHi, i);
 
     #pragma unroll
     for(int32_t j=0;j<WINDOWS;j++) {

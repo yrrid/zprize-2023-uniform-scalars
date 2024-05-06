@@ -40,21 +40,33 @@ void advanceOffset(size_t& current, size_t bytes) {
   current=current + add;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-MSMRunner<Curve, accumulation, windowBits, binBits, safety>::MSMRunner(uint32_t maxPointCount) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::MSMRunner(uint32_t maxPointCount) {
+  const uint32_t FIELDS_PER_AFFINE_POINT=2;
+
   _maxPointCount=maxPointCount;
+  _uniformBucketPointCount=0xFFFFFFFF;
+  _uniformBucketMSM=NULL;
+  if constexpr(uniformBuckets) 
+    _uniformBucketMSM=malloc(FIELDS_PER_AFFINE_POINT*Curve::limbs*4);
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::pointBytesRequired() {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::~MSMRunner() {
+  if constexpr(uniformBuckets)
+    free(_uniformBucketMSM);
+}
+
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::pointBytesRequired() {
   const uint32_t WINDOWS=Planning::WINDOWS;
   const uint32_t FIELDS_PER_POINT=(accumulation==ACCUMULATION_TWISTED_EDWARDS_XYT) ? 3 : 2;
 
   return ((size_t)(WINDOWS*FIELDS_PER_POINT*Curve::limbs*4))*_maxPointCount;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::planningBytesRequired() {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::planningBytesRequired() {
   const uint32_t WINDOWS=Planning::WINDOWS;
   const uint32_t INDEX_BITS=Planning::INDEX_BITS;
   const uint32_t BINS_PER_GROUP=Planning::BINS_PER_GROUP;
@@ -70,6 +82,9 @@ size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::planningByte
   advanceOffset(current, BUCKET_COUNT*4);                       // sortedBucketIndexes
   advanceOffset(current, BUCKET_COUNT*4);                       // sortedBucketCounts
   advanceOffset(current, BUCKET_COUNT*4);                       // sortedBucketOffsets
+
+  if(uniformBuckets)
+    advanceOffset(current, _maxPointCount*32);                  // randomScalars
 
   advanceOffset(current, BINS_PER_GROUP*groupCount*4);          // binCounts
   advanceOffset(current, BINS_PER_GROUP*4);                     // binOffsets
@@ -88,16 +103,16 @@ size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::planningByte
   return current;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::bucketBytesRequired() {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::bucketBytesRequired() {
   const uint32_t BUCKET_BITS=Planning::BUCKET_BITS;
   const uint32_t FIELDS_PER_BUCKET=(accumulation==ACCUMULATION_AFFINE) ? 2 : 4;
   
   return ((size_t)FIELDS_PER_BUCKET*Curve::limbs*4)<<BUCKET_BITS;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::reduceBytesRequired() {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::reduceBytesRequired() {
   const uint32_t MAX_SM_COUNT=256;
   const uint32_t MAX_WARP_COUNT=8;
   const uint32_t FIELDS_PER_BUCKET=4;
@@ -105,8 +120,8 @@ size_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::reduceBytesR
   return (size_t)(FIELDS_PER_BUCKET*Curve::limbs*4*MAX_SM_COUNT*MAX_WARP_COUNT); 
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPointGeneration(cudaStream_t stream, void* points, void* secretScalars, uint32_t pointCount) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runPointGeneration(cudaStream_t stream, void* points, void* secretScalars, uint32_t pointCount) {
   uint32_t* cpuScalars;
   void*     gpuScalars;
   int32_t   ec, smCount;
@@ -132,14 +147,13 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPointGen
   if(ec!=cudaSuccess) return ec;
   ec=cudaFree(gpuScalars);
   if(ec!=cudaSuccess) return ec;
-
   if(secretScalars==NULL)
     free(cpuScalars);
   return cudaSuccess;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPointPrecompute(cudaStream_t stream, void* scaledPoints, void* sourcePoints, uint32_t pointCount) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runPointPrecompute(cudaStream_t stream, void* scaledPoints, void* sourcePoints, uint32_t pointCount) {
   int32_t ec=0, smCount;
 
   ec=cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, 0);
@@ -155,8 +169,75 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPointPre
   return 0;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t startPoint, uint32_t stopPoint) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runUniformBucketsSetup(cudaStream_t stream, void* reduceMemory, void* bucketMemory, void* planningMemory, void* pointMemory, uint32_t pointCount) {
+  const uint32_t WINDOWS=Planning::WINDOWS;
+  const uint32_t BUCKET_COUNT=Planning::BUCKET_COUNT;
+  const uint32_t EXPONENT_HIGH_WORD=Planning::EXPONENT_HIGH_WORD;
+
+  void*    randomScalars;
+  void*    cpuReduce;
+  uint32_t resultPointCount;
+  size_t   reduceBytes=reduceBytesRequired();
+  int32_t  ec;
+
+  // UNIFORM BUCKET SUPPORT:
+  // 1.  If this is the first call, or if the point size has changed since the prior call:
+  // 2.    If this is the first call then:
+  // 3.      Generate random scalars and copy them to the GPU
+  // 4.    compute the MSM of the random scalars of size "pointCount"
+
+  if(!uniformBuckets || _uniformBucketPointCount==pointCount)
+    return cudaSuccess;
+
+  printf("Running uniform setup code\n");
+
+  randomScalars=planningMemory;
+  advancePointer(randomScalars, _maxPointCount*WINDOWS*4);
+  advancePointer(randomScalars, BUCKET_COUNT*4);
+  advancePointer(randomScalars, BUCKET_COUNT*4);
+  advancePointer(randomScalars, BUCKET_COUNT*4);
+
+  if(_uniformBucketPointCount==0xFFFFFFFF) {
+    uint32_t* cpuRandomScalars=(uint32_t*)malloc(_maxPointCount*32);
+
+    // For a production system, this should be a cryptographic random number generated, with a 128 bit seed.
+    // Also, note, this is not quite a uniform distribution, but it's pretty close.  Again, for production,
+    // I'd go with a good quality uniform field random generator, rather than just modding the top word.
+
+    for(int i=0;i<_maxPointCount;i++) {
+      for(int j=0;j<8;j++) 
+        cpuRandomScalars[i*8+j]=((rand() & 0xFFFF)<<16) + (rand() & 0xFFFF);
+      cpuRandomScalars[i*8+7]=cpuRandomScalars[i*8+7] % EXPONENT_HIGH_WORD;
+    }
+    ec=cudaMemcpy(randomScalars, cpuRandomScalars, _maxPointCount*32, cudaMemcpyHostToDevice);
+    if(ec!=cudaSuccess)
+      return ec;
+    free(cpuRandomScalars);
+  }
+
+  _uniformBucketPointCount=0xFFFFFFFF;
+  
+  // now we compute the MSM for the number of points that we have
+  cpuReduce=(void*)malloc(reduceBytes);
+  ec=runPlanning(stream, planningMemory, NULL, pointCount);
+  if(ec!=cudaSuccess) return ec;
+  ec=runAccumulate(stream, bucketMemory, planningMemory, pointMemory);
+  if(ec!=cudaSuccess) return ec;
+  ec=runReduce(stream, &resultPointCount, reduceMemory, bucketMemory);
+  if(ec!=cudaSuccess) return ec;
+  ec=cudaMemcpy(cpuReduce, reduceMemory, reduceBytes, cudaMemcpyDeviceToHost);
+  if(ec!=cudaSuccess) return ec;
+  runFinalReduce(_uniformBucketMSM, cpuReduce, resultPointCount);
+  free(cpuReduce);
+
+  _uniformBucketPointCount=pointCount;
+
+  return cudaSuccess;
+}
+
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t startPoint, uint32_t stopPoint) {
   const uint32_t WINDOWS=Planning::WINDOWS;
   const uint32_t INDEX_BITS=Planning::INDEX_BITS;
   const uint32_t SEGMENT_BITS=Planning::SEGMENT_BITS;
@@ -186,6 +267,10 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPlanning
   planning.sortedBucketCounts=(uint32_t*)advancePointer(planningMemory, BUCKET_COUNT*4);
   planning.sortedBucketOffsets=(uint32_t*)advancePointer(planningMemory, BUCKET_COUNT*4);
 
+  planning.randomScalars=NULL;
+  if(uniformBuckets)
+    planning.randomScalars=(uint32_t*)advancePointer(planningMemory, _maxPointCount*32);
+
   planning.binCounts=(uint32_t*)advancePointer(planningMemory, BINS_PER_GROUP*groupCount*4);
   planning.binOffsets=(uint32_t*)advancePointer(planningMemory, BINS_PER_GROUP*4);
   planning.bigBinCounts=(uint32_t*)advancePointer(planningMemory, 256*4);
@@ -204,7 +289,14 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPlanning
   if(ec!=0) return ec;
 
   zeroCounters<Planning><<<256, 256>>>(planning);
-  partitionIntoBins<Planning><<<smCount, 512>>>(planning, (uint4*)scalars, startPoint, stopPoint);
+  if constexpr (!uniformBuckets)
+    partitionIntoBins<Planning><<<smCount, 512>>>(planning, (uint4*)scalars, startPoint, stopPoint);
+  else {
+    if(scalars==NULL) 
+      partitionIntoBins<Planning><<<smCount, 512>>>(planning, (uint4*)planning.randomScalars, startPoint, stopPoint);
+    else 
+      partitionIntoBins<Planning><<<smCount, 512>>>(planning, (uint4*)scalars, (uint4*)planning.randomScalars, startPoint, stopPoint);
+  }
   computeBinOffsets<Planning><<<256, 256>>>(planning);
   sortBins<Planning><<<BINS_PER_GROUP/64, 256, pointsPerBinGroup*groupCount*4>>>(planning);
   processOverflows<Planning><<<smCount, 512>>>(planning);
@@ -213,13 +305,13 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPlanning
   return 0;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t pointCount) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runPlanning(cudaStream_t stream, void* planningMemory, void* scalars, uint32_t pointCount) {
   return runPlanning(stream, planningMemory, scalars, 0, pointCount);
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runAccumulate(cudaStream_t stream, void* bucketMemory, void* planningMemory, void* pointMemory, bool preloaded) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runAccumulate(cudaStream_t stream, void* bucketMemory, void* planningMemory, void* pointMemory, bool preloaded) {
   const uint32_t WINDOWS=Planning::WINDOWS;
   const uint32_t BUCKET_COUNT=Planning::BUCKET_COUNT;
 
@@ -251,8 +343,8 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runAccumula
   return cudaSuccess;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runReduce(cudaStream_t stream, uint32_t* reducePointCount, void* reduceMemory, void* bucketMemory) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runReduce(cudaStream_t stream, uint32_t* reducePointCount, void* reduceMemory, void* bucketMemory) {
   int32_t ec, smCount;
 
   if(reducePointCount!=NULL)
@@ -273,44 +365,56 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runReduce(c
   return cudaSuccess;
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-void MSMRunner<Curve, accumulation, windowBits, binBits, safety>::runFinalReduce(void* finalResult, void* reducedBuckets, uint32_t reducePointCount) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+void MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::runFinalReduce(void* finalResult, void* reducedBuckets, uint32_t reducePointCount) {
   uint64_t* reducedBucketsU64=(uint64_t*)reducedBuckets;
   
   typedef Host::Curve<typename Curve::HostField> HC;
 
   if constexpr (accumulation==ACCUMULATION_EXTENDED_JACOBIAN || accumulation==ACCUMULATION_EXTENDED_JACOBIAN_ML) {
     typename HC::PointXYZZ sum, sumOfSums, point;
-    typename HC::PointXY   msmResult, dmp;
+    typename HC::PointXY   msmResult, uniformMSM;
 
+    if(uniformBuckets && _uniformBucketPointCount!=0xFFFFFFFF) {
+      uniformMSM.load((uint64_t*)_uniformBucketMSM);
+      uniformMSM.fromDeviceMontgomeryToHostMontgomery();
+      uniformMSM.negate();
+      sum.addXY(uniformMSM);
+    }
     for(int i=0;i<reducePointCount;i++) {
       point.load(&reducedBucketsU64[i*24]);
       point.fromDeviceMontgomeryToHostMontgomery();
       sum.addXYZZ(point);
     }
     msmResult=sum.normalize();
-    msmResult.dump(true);  
+//    msmResult.dump(true);  
     msmResult.fromHostMontgomeryToDeviceMontgomery();
     msmResult.store((uint64_t*)finalResult);
   }
   else if constexpr (accumulation==ACCUMULATION_TWISTED_EDWARDS_XY || accumulation==ACCUMULATION_TWISTED_EDWARDS_XYT) {
     typename HC::PointXYTZ sum, point;
-    typename HC::PointXY   msmResult;
+    typename HC::PointXY   msmResult, uniformMSM;
 
+    if(uniformBuckets && _uniformBucketPointCount!=0xFFFFFFFF) {
+      uniformMSM.load((uint64_t*)_uniformBucketMSM);
+      uniformMSM.fromDeviceMontgomeryToHostMontgomery();
+      uniformMSM.negate();
+      sum.addXY(uniformMSM);
+    }
     for(int i=0;i<reducePointCount;i++) {
       point.load(&reducedBucketsU64[i*24]);
       point.fromDeviceMontgomeryToHostMontgomery();
       sum.addXYTZ(point);
     }
     msmResult=sum.normalize();
-    msmResult.dump(true);  
+//    msmResult.dump(true);  
     msmResult.fromHostMontgomeryToDeviceMontgomery();
     msmResult.store((uint64_t*)finalResult);
   }
 }
 
-template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety>
-int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::dumpOperations(const char* filename, void* planningMemory, uint32_t pointCount) {
+template<class Curve, Accumulation accumulation, uint32_t windowBits, uint32_t binBits, uint32_t safety, bool uniformBuckets>
+int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety, uniformBuckets>::dumpOperations(const char* filename, void* planningMemory, uint32_t pointCount) {
   const uint32_t BUCKET_COUNT=Planning::BUCKET_COUNT, WINDOWS=Planning::WINDOWS;
 
   FILE*     f;
@@ -347,5 +451,6 @@ int32_t MSMRunner<Curve, accumulation, windowBits, binBits, safety>::dumpOperati
 
   fclose(f);
   free(operations);
-  return 0;   
+  return cudaSuccess;   
 }
+

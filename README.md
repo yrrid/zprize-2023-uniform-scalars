@@ -1,14 +1,71 @@
-# Z-Prize MSM on the GPU Submission
-
-## Performance
-
-Our run times are ***357 ms*** (bls12377) and ***436 ms*** (bls12381)
+# Uniform Random Scalars
 
 ## Introduction
 
-The following is Yrrid Software and [Snarkify](https://snarkify.io/) (joint team) submission to the 2023 Z-Prize MSM on the GPU.
+The following is an update to Yrrid Software's and [Snarkify](https://snarkify.io/) (joint team) submission to the 2023 
+Z-Prize MSM on the GPU competition.
 
-The goal for this competition is to compute a batch of 4 MSMs of size 2^24 on an RTX A5000 Ada Generation GPU card, and support 
+We start with our latter submission to the ZPrize (it was submitted a few days after the competition closed) which was
+the fastest GPU MSM submission and here we update the code to support our uniformly distributed scalars idea.
+
+## ZPrize vs Real World Proof Systems
+
+The ZPrize competitions have been using uniformly random IID generated scalars.  This means that the count of points in each Pippenger buckets are 
+fairly evenly distributed -- technically, the number of points in each bucket is sampled from something close to a normal distribution.   Now 
+it turns out, with a real word proof system the scalars aren't uniformly distributed.  Small scalars, such as 1, 2, 4, 8, -1, -2, etc, occur 
+far more frequently than others.  This means that some Pippenger buckets can have thousands of points, while most only have a few dozen.  
+
+There are some known solutions for this problem, for example assigning multiple threads to larger buckets.  But these approaches are complex
+to implement and if not implemented with great care, there is the potential for timing attacks that could compromise the proof system security.
+
+We have discovered a solution, which we believe is simple, elegant, and efficient.
+
+## Our Solution
+
+We are given n fixed points, $P_1, P_2 ... P_n$ and $n$ variable scalars, $s_1, s_2, ... s_n$, and we need to compute:
+
+   $$\mbox{MSM}(s, P) = \sum_{i\in 1 .. n}{s_i * P_i}$$
+
+One time setup step: pregenerate $n$ IID uniform random scalars, $r_1, r_2, r_3, ... r_n$ and precompute a single 
+point:  
+
+   $$P_r = \mbox{MSM}(r, P) = \sum_{i\in 1 .. n}{r_i * P_i}$$
+
+To compute an MSM(s, P), we now compute:
+
+   $$\mbox{MSM}(s, P) = \mbox{MSM}(s+r, P) - P_r = \Big(\sum_{i\in 1 .. n}{(s_i + r_i) * P_i}\Big) - P_r$$
+     
+Note since $r_i$ was IID and uniformly distributed, $s_i + r_i$ will be IID and uniformly distributed, and therefore, we have solved the
+bucket problem.
+
+## Overhead Analysis
+
+We have the one time costs of randomly generating scalars and a single $n$ point MSM.
+
+Then on each run we have the overhead of $n$ scalar additions, and 1 EC point subtraction.  
+
+## Run Time Results
+
+We have implemented the uniform scalars idea in this repo, and comparing the MSM run-times using the randoms vs a control run where
+they are not used, are almost identical.  The overhead is much less than the run to run variation.  But to put a number on it, the
+random scalars overhead is less than 1% of the total MSM run time.
+
+## Questions
+
+For technical questions, please feel free to email me at `nemmart at yrrid.com`.
+
+-----------------------------------------------------------------------------------------
+
+
+# Z-Prize MSM on the GPU Submission
+
+##Performance
+
+Our run times are 357 ms (bls12377) and 436 ms (bls12381)
+
+## Competition Objective
+
+The objective for this competition is to compute a batch of 4 MSMs of size 2^24 on an RTX A5000 Ada Generation GPU card, and support 
 two curves, BLS-12377-G1 and BLS-12381-G1.  The process is as follows.  First a set of 2^24 base points are constructed on the
 CPU.  These are copied over to the GPU, and the GPU implementation has the opportunity to perform limited pre-computations.
 Next 4 sets of 2^24 scalars are generated (on the CPU) and the timer is started.  The scalars must be copied over to the GPU

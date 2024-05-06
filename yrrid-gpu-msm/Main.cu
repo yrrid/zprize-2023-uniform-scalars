@@ -10,7 +10,7 @@ Author(s):  Niall Emmart
 
 #include "MSMBatch.cu"
 
-#define SIZE (1<<21)
+#define SIZE (1<<24)
 #define BATCHES 4
 
 uint32_t randomWord() {
@@ -59,6 +59,15 @@ void dumpHex256(const char* filename, uint32_t* values, uint32_t count) {
   fclose(f);
 }
 
+#include <sys/time.h>
+uint64_t clockMS() {
+  struct timeval te;
+
+  gettimeofday(&te, NULL); // get current time
+  uint64_t milliseconds = ((uint64_t)te.tv_sec)*1000L + ((uint64_t)te.tv_usec)/1000L; // calculate milliseconds
+  return milliseconds;
+}
+
 int main(int argc, char** argv) {
   void*     context;
   uint32_t* secret;
@@ -74,8 +83,8 @@ int main(int argc, char** argv) {
 
   context=createContext(curve, BATCHES, SIZE);
 
-  secret=(uint32_t*)malloc(SIZE*32);
-  scalars=(uint32_t*)malloc(SIZE*32*BATCHES);
+  secret=(uint32_t*)malloc(SIZE*32ul);
+  scalars=(uint32_t*)malloc(SIZE*32ul*BATCHES);
   for(int i=0;i<BATCHES;i++) 
     scalarSet[i]=scalars+SIZE*8*i;
 
@@ -93,7 +102,13 @@ int main(int argc, char** argv) {
   dumpHex256("secrets.hex", secret, SIZE);
 
   preprocessPoints(context, points, SIZE);
+
+for(int i=0;i<10;i++) {
+uint64_t timer=-clockMS();
   processBatches(context, results, (void**)scalarSet, BATCHES, SIZE);
+timer+=clockMS();
+printf("Run time: %ld ms\n", timer);
+}
 
   for(int i=0;i<BATCHES*2;i++) {
     for(int j=11;j>=0;j--)
